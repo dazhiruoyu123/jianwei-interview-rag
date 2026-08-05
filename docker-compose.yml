@@ -1,0 +1,37 @@
+services:
+  api:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      DATA_DIR: /app/data
+      EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-hash}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-v4-pro}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123456}
+    volumes:
+      - ./data:/app/data
+      - model-cache:/app/model-cache
+    mem_limit: 2400m
+    cpus: 2.5
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 240s
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    ports: ["80:80"]
+    depends_on:
+      api: {condition: service_healthy}
+    mem_limit: 256m
+    cpus: 0.5
+volumes:
+  model-cache:

@@ -1,0 +1,4 @@
+data/
+*.zip
+.git/
+__pycache__/
