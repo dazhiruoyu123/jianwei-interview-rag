@@ -1,192 +1,225 @@
-# Jianwei Interview RAG
+# 鉴微：面试训练与知识库系统
 
-Jianwei (??) is a lightweight interview question bank, retrieval, mock interview, and review system. It uses a PHP/Apache frontend, FastAPI backend, SQLite metadata storage, and a lightweight vector retrieval layer. The project is designed for small servers and Docker Compose deployment.
+鉴微是一套面向个人求职者和小型团队的面试准备系统。它把岗位目标、JD、简历、项目材料、题库检索、模拟面试、复习计划和训练报告串成一个可持续迭代的训练闭环，并针对轻量服务器提供 Docker Compose 部署方案。
 
-## Status
+当前版本：`v4.0.0`
 
-Current version: `v2.4.0`
+## 页面截图
 
-v1.8 is the final polishing release for this deployment:
+![鉴微登录页](docs/screenshots/login-desktop.png)
 
-- Simplifies the sidebar search box to plain text input only.
-- Enlarges the Question Management search field for long keywords and answer snippets.
-- Keeps the grouped sidebar navigation introduced in v1.7.
-- Keeps consistent Question / Answer cards across retrieval, review, and management pages.
-- Keeps Markdown-compatible display for questions and answers.
-- Adds this GitHub-ready README and a safe `.gitignore`.
+登录后默认进入“训练工作台”，可查看面试准备度、7 天计划、今日任务、薄弱项和历史成绩趋势。
 
-## Features
+## 核心能力
 
-- Smart Q&A: retrieves Top 3 sources from the question bank and returns a grounded answer.
-- Custom Retrieval: semantic, keyword, and hybrid search with adjustable weights.
-- Mock Interview: randomly selects 6 questions from a chosen bank, evaluates answers, and asks follow-up questions.
-- Review Plan: review queue based on answered mock interview questions.
-- Question Banks: create and manage multiple bank spaces.
-- Question Management: search by question, answer, and tags; edit question and answer separately.
-- Multi-format Import: JSON, CSV, Markdown, and TXT.
-- Markdown Display: question and answer content can be written and displayed in Markdown.
+- **训练工作台**：配置目标岗位、面试日期、经验阶段和每日训练时长，自动生成 7 天训练计划。
+- **材料驱动训练**：支持上传 PDF、Word、Markdown、TXT、JSON 和 CSV，提取 JD、简历与项目材料内容。
+- **准备度评估**：综合资料完整度、训练完成度、模拟面试成绩和复习情况，展示准备度与分项得分。
+- **智能问答**：从个人题库检索相关内容，再结合可选的大模型生成有依据的回答。
+- **混合检索**：支持语义检索、关键词检索和可调权重的混合检索。
+- **通用模拟面试**：从指定题库抽题、追问、评分并生成报告，低分题自动加入复习计划。
+- **项目深挖面试**：自动带入项目材料，围绕技术选型、个人贡献、难点和结果继续追问。
+- **间隔复习**：根据作答结果维护复习队列；完成到期复习后同步更新训练任务。
+- **题库管理**：支持多题库、题目编辑、标签筛选和批量导入。
+- **多用户隔离**：题库、训练档案、面试记录和复习数据按用户隔离，并提供管理员能力。
 
-## Architecture
+## 业务闭环
 
 ```mermaid
 flowchart LR
-    Browser[Browser] --> Web[PHP / Apache Frontend]
-    Web --> API[FastAPI Backend]
-    API --> Auth[Token Auth]
-    API --> DB[(SQLite Metadata)]
-    API --> Vector[Milvus Lite / Vector Index]
-    API --> Embed[Lightweight Embedding or Hash Backend]
-    API --> LLM[DeepSeek API Optional]
+    A[设定目标岗位与面试日期] --> B[上传 JD / 简历 / 项目材料]
+    B --> C[生成 7 天训练计划]
+    C --> D[题库学习与智能检索]
+    D --> E[通用模拟面试 / 项目深挖]
+    E --> F[评分、报告与薄弱项识别]
+    F --> G[低分题进入间隔复习]
+    G --> H[准备度与趋势更新]
+    H --> C
 ```
 
-## Runtime Flow
+## 整体架构
+
+```mermaid
+flowchart TB
+    User[桌面端 / 移动端浏览器]
+
+    subgraph Web[表现层]
+        Apache[Apache]
+        PHP[PHP 页面]
+        JS[原生 JavaScript + CSS]
+    end
+
+    subgraph API[业务与接口层 FastAPI]
+        Auth[认证与多用户隔离]
+        Coach[训练计划与准备度]
+        Interview[模拟面试与报告]
+        Question[题库、导入与检索]
+        Review[复习调度]
+        AI[大模型适配器]
+    end
+
+    subgraph Data[数据与检索层]
+        SQLite[(SQLite)]
+        Milvus[(Milvus Lite 向量索引)]
+        Embed[FastEmbed / Hash 向量化]
+    end
+
+    DeepSeek[DeepSeek 兼容 API]
+
+    User --> Apache
+    Apache --> PHP
+    PHP --> JS
+    JS -->|REST / JSON| Auth
+    Auth --> Coach
+    Auth --> Interview
+    Auth --> Question
+    Auth --> Review
+    Coach --> SQLite
+    Interview --> SQLite
+    Question --> SQLite
+    Review --> SQLite
+    Question --> Embed
+    Embed --> Milvus
+    AI --> DeepSeek
+    Interview --> AI
+    Question --> AI
+```
+
+### 模块职责
+
+| 层级 | 主要技术 | 职责 |
+| --- | --- | --- |
+| 表现层 | PHP、Apache、JavaScript、CSS | 页面渲染、交互状态、Markdown 展示和 API 代理 |
+| 接口层 | FastAPI、Pydantic | 认证、参数校验、业务接口和健康检查 |
+| 训练域 | Coach、Interview、Review | 训练计划、准备度、模拟面试、报告和间隔复习 |
+| 知识库域 | Question、Import、Search | 题库管理、材料导入、关键词/语义混合检索 |
+| 数据层 | SQLite | 用户、题库、训练档案、任务、面试与复习记录 |
+| 向量层 | FastEmbed、Milvus Lite | 中文文本向量化、候选召回和用户级过滤 |
+| AI 层 | OpenAI 兼容接口 | 回答生成、面试追问、评分和自动标签 |
+
+## 关键数据流
 
 ```mermaid
 sequenceDiagram
-    participant U as User
-    participant W as PHP Frontend
+    participant U as 用户
+    participant W as Web 前端
     participant A as FastAPI
     participant D as SQLite
-    participant V as Vector Index
-    U->>W: Search / Ask / Manage
-    W->>A: REST API request
-    A->>D: Read metadata and question content
-    A->>V: Retrieve vector candidates
-    A-->>W: Return ranked Question / Answer blocks
-    W-->>U: Render Markdown-compatible result cards
+    participant V as Milvus Lite
+    participant L as 大模型 API
+
+    U->>W: 设置岗位并上传材料
+    W->>A: 保存训练档案
+    A->>D: 写入档案并生成训练任务
+    U->>W: 开始检索或模拟面试
+    W->>A: 提交问题 / 回答
+    A->>V: 召回个人题库候选
+    A->>D: 读取题目与上下文
+    A->>L: 生成回答、追问或评分
+    L-->>A: 返回结构化结果
+    A->>D: 保存报告、薄弱项与复习状态
+    A-->>W: 返回结果和最新准备度
 ```
 
-## Directory Structure
+## 目录结构
 
 ```text
 interview-rag/
-??? backend/
-?   ??? Dockerfile
-?   ??? requirements.txt
-?   ??? app/main.py
-??? frontend/
-?   ??? Dockerfile
-?   ??? apache.conf
-?   ??? public/
-?       ??? index.php
-?       ??? assets/
-?           ??? app.css
-?           ??? app.js
-??? data/                 # runtime data, do not publish real data
-??? docker-compose.yml
-??? .env.example
-??? .gitignore
-??? README.md
+|-- backend/
+|   |-- app/main.py           # FastAPI 接口与核心业务
+|   |-- tests/test_coach.py   # 训练闭环回归测试
+|   |-- requirements.txt
+|   `-- Dockerfile
+|-- frontend/
+|   |-- public/
+|   |   |-- index.php
+|   |   `-- assets/
+|   |       |-- app.js
+|   |       `-- app.css
+|   |-- apache.conf
+|   `-- Dockerfile
+|-- docs/screenshots/         # README 页面截图
+|-- data/                     # 运行数据，不应提交真实内容
+|-- docker-compose.yml
+|-- .env.example
+`-- README.md
 ```
 
-## Quick Start
+## 快速启动
+
+环境要求：Docker Engine 和 Docker Compose v2。
 
 ```bash
 cp .env.example .env
 docker compose up -d --build
 ```
 
-Open:
-
-```text
-http://127.0.0.1/
-```
-
-Health check:
-
-```bash
-curl http://127.0.0.1/health
-```
-
-## Environment Variables
-
-```env
-ADMIN_USER=admin
-ADMIN_PASSWORD=change-me
-DEEPSEEK_API_KEY=
-DEEPSEEK_MODEL=deepseek-v4-pro
-EMBEDDING_BACKEND=hash
-```
-
-Notes:
-
-- `EMBEDDING_BACKEND=hash` is resource-friendly for 4-core 4GB servers.
-- A stronger Chinese embedding model can be enabled later if more memory is available.
-- Keep `.env` private and never commit real API keys.
-
-## Docker Deployment
-
-```bash
-cd /opt/interview-rag
-docker compose up -d --build
-```
-
-Check services:
+打开 `http://127.0.0.1/`，并检查服务：
 
 ```bash
 docker compose ps
 curl http://127.0.0.1/health
 ```
 
-## Open Source Checklist
+健康接口返回的 `version` 应为 `4.0.0`。
 
-Before publishing to GitHub:
+## 环境变量
 
-- Do not commit `.env`, `data/`, database files, logs, or real question banks.
-- Keep `.env.example` as the public configuration template.
-- Add screenshots after UI stabilization.
-- Add a `LICENSE` file, such as MIT or Apache-2.0.
-- Add sanitized sample data if you want users to try the system quickly.
-- Consider GitHub Actions for Docker image build checks.
-
-## Release Package
-
-```bash
-cd /opt
-tar --exclude='interview-rag/data' --exclude='interview-rag/.env' -czf /root/jianwei-v1.8-final.tar.gz interview-rag
+```env
+ADMIN_USER=admin
+ADMIN_PASSWORD=change-me
+DEEPSEEK_API_KEY=
+DEEPSEEK_MODEL=deepseek-v4-pro
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+EMBEDDING_BACKEND=hash
+REBUILD_VECTOR_INDEX=0
 ```
 
-## Roadmap
+- 小内存环境可使用 `EMBEDDING_BACKEND=hash`，不需要下载模型。
+- 中文检索效果优先时可使用 `EMBEDDING_BACKEND=fastembed`。
+- 仅在明确需要重建向量索引时设置 `REBUILD_VECTOR_INDEX=1`。
+- `.env`、真实数据库、题库、日志和 API Key 不应提交到 GitHub。
 
-- GitHub Actions build and lint workflow.
-- Role-based user management.
-- Full Markdown renderer with tables and task lists.
-- Import preview and failed-row export.
-- Optional external vector database backend.
-- More configurable embedding and LLM providers.
+## 生产部署
 
+建议先备份源码和 SQLite，再执行更新：
 
-## v2.0 Import UI
+```bash
+cd /opt/interview-rag
+cp data/app.db "data/app.db.backup-$(date +%Y%m%d-%H%M%S)"
+docker compose up -d --build
+docker compose ps
+curl http://127.0.0.1/health
+```
 
-v2.0 focuses on the batch import page experience:
+数据库初始化采用追加式迁移：`v4.0.0` 会新增训练档案、训练任务和面试报告字段，不会主动清空已有用户、题库、向量索引或面试记录。
 
-- Larger upload card with selected file name and file size.
-- Clear upload progress bar and success/error status block.
-- Side-by-side Markdown question-bank partition guide.
-- Reset button for clearing selected file, progress and result.
-- Server package path: `/root/jianwei-v2.0-final.tar.gz`.
+## 测试
 
+```bash
+cd backend
+pytest -q
+python -m compileall -q app
+```
 
-## v2.1 Tailwind UI
+前端 PHP 语法检查：
 
-v2.1 modernizes the PHP frontend with Tailwind CDN while preserving existing PHP routing, form IDs, JavaScript hooks and API behavior.
+```bash
+php -l frontend/public/index.php
+```
 
-- Notion/Vercel-inspired neutral UI language.
-- Tailwind CDN included directly in `frontend/public/index.php`.
-- Existing backend and API logic preserved.
-- Server package path: `/root/jianwei-v2.1-final.tar.gz`.
+## v4.0.0 更新摘要
 
+- 默认首页升级为训练工作台。
+- 新增求职目标、材料管理和自动 7 天计划。
+- 新增准备度、分项得分、薄弱项和成绩趋势。
+- 项目材料可直接进入项目深挖面试。
+- 低分题、复习计划、训练任务和面试报告实现状态联动。
+- 新增训练闭环回归测试，并保持对已有业务数据的兼容。
 
-## v2.2 Sidebar Refresh
+## 安全说明
 
-v2.2 sharpens the left navigation into a calmer SaaS-style shell, with stronger hierarchy, softer surfaces, and a more premium information density.
-
-
-## v2.3 AdminLTE Refresh
-
-This release refreshes the shell toward an AdminLTE-inspired console: stronger left navigation hierarchy, calmer surfaces, and more polished spacing.
-
-
-## v2.4 Lite Shell
-
-Simplifies the AdminLTE-inspired UI by removing repeated sidebar promotional blocks and reducing the top title bar to a cleaner title/status layout.
+- 首次部署后立即修改默认管理员密码。
+- 生产环境建议启用 HTTPS，并限制服务器管理端口来源。
+- 发布代码前检查 `.gitignore`，不要提交 `.env`、`data/`、备份文件或真实用户材料。
+- 对外分享截图前，隐藏用户名、题库内容、简历、JD、项目材料和面试记录。

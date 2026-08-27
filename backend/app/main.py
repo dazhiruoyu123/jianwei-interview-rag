@@ -48,7 +48,7 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 SHOWDOC_PUSH_CONFIG = Path(os.getenv("SHOWDOC_PUSH_CONFIG", "/run/secrets/showdoc-push.env"))
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123456")
-APP_VERSION = "3.0.0"
+APP_VERSION = "4.0.0"
 SEARCH_TOP_K = 3
 PUSH_TIMEZONE = ZoneInfo("Asia/Shanghai")
 logger = logging.getLogger(__name__)
@@ -162,6 +162,21 @@ class UserAISettingsIn(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     api_key: str | None = Field(default=None, max_length=1000)
     enabled: bool = True
+
+
+class CoachProfileIn(BaseModel):
+    target_position: str = Field(min_length=1, max_length=120)
+    interview_date: str = Field(default="", max_length=10)
+    experience_level: str = Field(default="1-3 年", max_length=40)
+    daily_minutes: int = Field(default=30, ge=15, le=180)
+    jd_text: str = Field(default="", max_length=30000)
+    resume_summary: str = Field(default="", max_length=30000)
+    project_summary: str = Field(default="", max_length=30000)
+    focus_areas: list[str] = Field(default_factory=list)
+
+
+class CoachTaskIn(BaseModel):
+    completed: bool
 
 
 def db():
@@ -463,6 +478,34 @@ def init_db():
               last_run_date TEXT,
               updated_at INTEGER
             );
+            CREATE TABLE IF NOT EXISTS coach_profiles(
+              user_id TEXT PRIMARY KEY,
+              target_position TEXT NOT NULL,
+              interview_date TEXT,
+              experience_level TEXT,
+              daily_minutes INTEGER NOT NULL DEFAULT 30,
+              jd_text TEXT,
+              resume_summary TEXT,
+              project_summary TEXT,
+              focus_areas TEXT NOT NULL DEFAULT '[]',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS training_tasks(
+              id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              task_type TEXT NOT NULL,
+              title TEXT NOT NULL,
+              description TEXT,
+              due_date TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'pending',
+              action_url TEXT NOT NULL,
+              source_ref TEXT NOT NULL DEFAULT '',
+              created_at INTEGER NOT NULL,
+              completed_at INTEGER,
+              UNIQUE(user_id,due_date,task_type,title)
+            );
+            CREATE INDEX IF NOT EXISTS idx_training_tasks_user_due ON training_tasks(user_id,due_date,status);
             INSERT OR IGNORE INTO push_settings(id,enabled,push_time,include_answer,updated_at) VALUES(1,1,'09:00',1,0);
             """
         )
@@ -494,6 +537,8 @@ def init_db():
             ("project_title", "TEXT DEFAULT ''"),
             ("project_context", "TEXT DEFAULT ''"),
             ("generated_questions", "TEXT DEFAULT '[]'"),
+            ("completed_at", "INTEGER"),
+            ("report_score", "REAL"),
         ]:
             add_column(connection, "interviews", column, definition)
         add_column(connection, "search_logs", "user_id", "TEXT")
@@ -1463,6 +1508,216 @@ def recall_probability(stability, last_reviewed_at):
     return round(math.exp(-elapsed_days / max(float(stability or 1), 0.1)), 4)
 
 
+def coach_today():
+    return datetime.now(PUSH_TIMEZONE).date()
+
+
+def serialize_coach_profile(row):
+    if not row:
+        return {
+            "configured": False,
+            "target_position": "",
+            "interview_date": "",
+            "experience_level": "1-3 年",
+            "daily_minutes": 30,
+            "jd_text": "",
+            "resume_summary": "",
+            "project_summary": "",
+            "focus_areas": [],
+        }
+    profile = dict(row)
+    profile["configured"] = True
+    profile["focus_areas"] = safe_json_list(profile.get("focus_areas"))
+    return profile
+
+
+def refresh_training_plan(connection, user_id, profile):
+    if not profile or not str(profile.get("target_position") or "").strip():
+        return
+    today = coach_today()
+    focus = safe_json_list(profile.get("focus_areas"))
+    focus_label = "、".join(str(item) for item in focus[:2]) or "岗位核心知识"
+    has_project = bool(str(profile.get("project_summary") or "").strip())
+    interview_url = "/?page=interview&mode=project" if has_project else "/?page=interview&mode=general"
+    templates = [
+        (0, "baseline", "完成一次基线模拟面试", "用完整的一轮回答建立当前能力基线。", interview_url),
+        (0, "review", "清理今日到期复习", "优先巩固面试中已经暴露的薄弱题。", "/?page=review"),
+        (1, "knowledge", f"专项梳理：{focus_label}", "通过有来源的 RAG 问答补齐核心概念和工程边界。", "/?page=ask"),
+        (2, "project_interview", "完成一次项目深挖", "重点回答个人贡献、架构取舍、指标和故障复盘。", "/?page=interview&mode=project"),
+        (3, "review", "完成薄弱题间隔复习", "不要背答案，先独立回答再核对评分要点。", "/?page=review"),
+        (4, "general_interview", "完成一次岗位专项面试", "检查基础知识是否能在压力下完整表达。", "/?page=interview&mode=general"),
+        (5, "knowledge", f"补齐薄弱知识：{focus_label}", "围绕最近低分项连续追问，形成可复述的答案。", "/?page=ask"),
+        (6, "retest", "进行本周复测", "与基线结果比较，确认真正掌握而不是短期记忆。", interview_url),
+    ]
+    now = int(time.time())
+    for offset, task_type, title, description, action_url in templates:
+        due_date = (today + timedelta(days=offset)).isoformat()
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO training_tasks(
+              id,user_id,task_type,title,description,due_date,status,action_url,source_ref,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (str(uuid.uuid4()), user_id, task_type, title, description, due_date, "pending", action_url, "coach-plan", now),
+        )
+
+
+def complete_next_interview_task(connection, user_id, mode, interview_id):
+    today = coach_today().isoformat()
+    types = ("project_interview", "baseline", "retest") if mode == "project" else ("general_interview", "baseline", "retest")
+    placeholders = ",".join("?" for _ in types)
+    row = connection.execute(
+        f"""
+        SELECT id FROM training_tasks
+        WHERE user_id=? AND status='pending' AND due_date<=? AND task_type IN ({placeholders})
+        ORDER BY due_date,created_at LIMIT 1
+        """,
+        (user_id, today, *types),
+    ).fetchone()
+    if row:
+        connection.execute(
+            "UPDATE training_tasks SET status='completed',completed_at=?,source_ref=? WHERE id=?",
+            (int(time.time()), interview_id, row["id"]),
+        )
+
+
+def coach_dashboard(user_id):
+    today = coach_today()
+    now = int(time.time())
+    with db() as connection:
+        profile_row = connection.execute("SELECT * FROM coach_profiles WHERE user_id=?", (user_id,)).fetchone()
+        profile = serialize_coach_profile(profile_row)
+        knowledge_count = connection.execute(
+            "SELECT COUNT(*) FROM questions WHERE owner_user_id=? AND parent_id IS NULL", (user_id,)
+        ).fetchone()[0]
+        interview_rows = connection.execute(
+            """
+            SELECT i.id,i.mode,i.project_title,i.created_at,i.completed_at,
+              AVG(CASE WHEN t.depth=0 THEN t.score END) AS score,
+              COUNT(CASE WHEN t.depth=0 THEN 1 END) AS answered
+            FROM interviews i LEFT JOIN interview_turns t ON t.interview_id=i.id
+            WHERE i.user_id=? GROUP BY i.id ORDER BY i.created_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        review_stats = connection.execute(
+            """
+            SELECT COUNT(*) AS learned,
+              SUM(CASE WHEN next_review_at IS NULL OR next_review_at<=? THEN 1 ELSE 0 END) AS due,
+              COALESCE(SUM(review_count),0) AS completed
+            FROM user_question_states WHERE user_id=?
+            """,
+            (now, user_id),
+        ).fetchone()
+        tasks = connection.execute(
+            """
+            SELECT * FROM training_tasks
+            WHERE user_id=? AND (due_date<=? OR (status='completed' AND due_date=?))
+            ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,due_date,created_at LIMIT 12
+            """,
+            (user_id, today.isoformat(), today.isoformat()),
+        ).fetchall()
+        completed_task_count = connection.execute(
+            "SELECT COUNT(*) FROM training_tasks WHERE user_id=? AND status='completed'", (user_id,)
+        ).fetchone()[0]
+        feedback_rows = connection.execute(
+            """
+            SELECT t.feedback FROM interview_turns t JOIN interviews i ON i.id=t.interview_id
+            WHERE i.user_id=? AND t.depth=0 ORDER BY t.created_at DESC LIMIT 60
+            """,
+            (user_id,),
+        ).fetchall()
+
+    completed_interviews = [row for row in interview_rows if int(row["answered"] or 0) > 0]
+    scores = [float(row["score"] or 0) for row in completed_interviews]
+    average_score = round(sum(scores) / len(scores), 1) if scores else 0
+    dimension_values = {}
+    weakness_counts = {}
+    for row in feedback_rows:
+        try:
+            evaluation = json.loads(row["feedback"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        for key, value in (evaluation.get("dimensions") or {}).items():
+            try:
+                dimension_values.setdefault(key, []).append(float(value))
+            except (TypeError, ValueError):
+                continue
+        for item in evaluation.get("weaknesses", []):
+            label = str(item).strip()
+            if label:
+                weakness_counts[label] = weakness_counts.get(label, 0) + 1
+
+    dimension_labels = {
+        "authenticity": "项目真实性与证据",
+        "architecture": "架构设计",
+        "troubleshooting": "故障排查",
+        "tradeoff": "技术取舍",
+        "communication": "表达结构",
+    }
+    dimensions = {
+        key: round(sum(values) / len(values), 1) for key, values in dimension_values.items() if values
+    }
+    weak_areas = [
+        {"name": dimension_labels.get(key, key), "score": score, "source": "能力维度"}
+        for key, score in sorted(dimensions.items(), key=lambda item: item[1])[:3]
+    ]
+    for label, count in sorted(weakness_counts.items(), key=lambda item: (-item[1], item[0])):
+        if len(weak_areas) >= 5:
+            break
+        if not any(item["name"] == label for item in weak_areas):
+            weak_areas.append({"name": label, "score": None, "source": f"出现 {count} 次"})
+
+    profile_score = 0
+    if profile["configured"]:
+        profile_score = 8
+        profile_score += 4 if profile.get("interview_date") else 0
+        profile_score += 4 if profile.get("jd_text") else 0
+        profile_score += 4 if profile.get("resume_summary") or profile.get("project_summary") else 0
+    knowledge_score = min(20, round(knowledge_count / 30 * 20))
+    interview_score = min(35, round(len(completed_interviews) * 5 + average_score * 0.2))
+    review_score = min(25, round(float(review_stats["completed"] or 0) * 2.5))
+    readiness = min(100, profile_score + knowledge_score + interview_score + review_score)
+    days_left = None
+    if profile.get("interview_date"):
+        try:
+            days_left = max(0, (datetime.strptime(profile["interview_date"], "%Y-%m-%d").date() - today).days)
+        except ValueError:
+            pass
+
+    recent = []
+    for row in reversed(completed_interviews[:8]):
+        recent.append(
+            {
+                "date": datetime.fromtimestamp(row["created_at"], PUSH_TIMEZONE).strftime("%m-%d"),
+                "score": round(float(row["score"] or 0), 1),
+                "mode": row["mode"] or "general",
+            }
+        )
+    return {
+        "profile": profile,
+        "readiness": readiness,
+        "readiness_breakdown": {
+            "目标材料": profile_score,
+            "知识储备": knowledge_score,
+            "模拟面试": interview_score,
+            "复习巩固": review_score,
+        },
+        "days_left": days_left,
+        "stats": {
+            "knowledge_count": knowledge_count,
+            "interview_count": len(completed_interviews),
+            "average_score": average_score,
+            "due_reviews": int(review_stats["due"] or 0),
+            "completed_tasks": completed_task_count,
+        },
+        "tasks": [dict(row) for row in tasks],
+        "weak_areas": weak_areas,
+        "dimensions": dimensions,
+        "recent_interviews": recent,
+    }
+
+
 def get_question_tree(connection, bank_id=None):
     where = "WHERE bank_id=?" if bank_id else ""
     args = [bank_id] if bank_id else []
@@ -1633,6 +1888,97 @@ def auth_me(user_id: str = Depends(require_auth)):
             (user_id,),
         ).fetchone()
     return dict(user)
+
+
+@app.get("/api/coach/dashboard")
+def get_coach_dashboard(user_id: str = Depends(require_auth)):
+    return coach_dashboard(user_id)
+
+
+@app.get("/api/coach/profile")
+def get_coach_profile(user_id: str = Depends(require_auth)):
+    with db() as connection:
+        row = connection.execute("SELECT * FROM coach_profiles WHERE user_id=?", (user_id,)).fetchone()
+    return serialize_coach_profile(row)
+
+
+@app.put("/api/coach/profile")
+def save_coach_profile(payload: CoachProfileIn, user_id: str = Depends(require_auth)):
+    interview_date = payload.interview_date.strip()
+    if interview_date:
+        try:
+            parsed_date = datetime.strptime(interview_date, "%Y-%m-%d").date()
+        except ValueError as error:
+            raise HTTPException(400, "面试日期格式应为 YYYY-MM-DD") from error
+        if parsed_date < coach_today():
+            raise HTTPException(400, "面试日期不能早于今天")
+    now = int(time.time())
+    focus_areas = list(dict.fromkeys(item.strip() for item in payload.focus_areas if item.strip()))[:12]
+    with db() as connection:
+        connection.execute(
+            """
+            INSERT INTO coach_profiles(
+              user_id,target_position,interview_date,experience_level,daily_minutes,
+              jd_text,resume_summary,project_summary,focus_areas,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET
+              target_position=excluded.target_position,interview_date=excluded.interview_date,
+              experience_level=excluded.experience_level,daily_minutes=excluded.daily_minutes,
+              jd_text=excluded.jd_text,resume_summary=excluded.resume_summary,
+              project_summary=excluded.project_summary,focus_areas=excluded.focus_areas,
+              updated_at=excluded.updated_at
+            """,
+            (
+                user_id,
+                payload.target_position.strip(),
+                interview_date,
+                payload.experience_level.strip(),
+                payload.daily_minutes,
+                payload.jd_text.strip(),
+                payload.resume_summary.strip(),
+                payload.project_summary.strip(),
+                json.dumps(focus_areas, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        row = connection.execute("SELECT * FROM coach_profiles WHERE user_id=?", (user_id,)).fetchone()
+        connection.execute(
+            "DELETE FROM training_tasks WHERE user_id=? AND status='pending' AND source_ref='coach-plan' AND due_date>=?",
+            (user_id, coach_today().isoformat()),
+        )
+        refresh_training_plan(connection, user_id, dict(row))
+    return {"message": "求职目标与训练计划已更新", "profile": serialize_coach_profile(row)}
+
+
+@app.post("/api/coach/materials/extract")
+async def extract_coach_material(
+    file: UploadFile = File(...),
+    user_id: str = Depends(require_auth),
+):
+    if not file.filename or not file.filename.lower().endswith((".pdf", ".docx", ".md", ".markdown", ".txt", ".json", ".csv")):
+        raise HTTPException(400, "仅支持 PDF、Word、Markdown、TXT、JSON 和 CSV 文件")
+    raw = await file.read()
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(400, "材料文件不能超过 10 MB")
+    text = extract_project_document(file.filename, raw).strip()
+    if not text:
+        raise HTTPException(400, "未能从材料中提取有效文字")
+    return {"filename": file.filename, "text": text[:30000], "characters": min(len(text), 30000)}
+
+
+@app.patch("/api/coach/tasks/{task_id}")
+def update_coach_task(task_id: str, payload: CoachTaskIn, user_id: str = Depends(require_auth)):
+    status = "completed" if payload.completed else "pending"
+    completed_at = int(time.time()) if payload.completed else None
+    with db() as connection:
+        changed = connection.execute(
+            "UPDATE training_tasks SET status=?,completed_at=? WHERE id=? AND user_id=?",
+            (status, completed_at, task_id, user_id),
+        ).rowcount
+    if not changed:
+        raise HTTPException(404, "训练任务不存在")
+    return {"message": "训练进度已更新", "status": status}
 
 
 @app.get("/api/ai/settings")
@@ -2465,6 +2811,8 @@ async def interview_answer(interview_id: str, payload: InterviewAnswerIn, user_i
         }
     follow_up = result.get("follow_up") if next_depth <= 2 else ""
     turn_id = str(uuid.uuid4())
+    score = float(result.get("score", 0) or 0)
+    now = int(time.time())
     with db() as connection:
         connection.execute(
             "INSERT INTO interview_turns VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -2477,10 +2825,23 @@ async def interview_answer(interview_id: str, payload: InterviewAnswerIn, user_i
                 json.dumps(result, ensure_ascii=False),
                 follow_up,
                 payload.depth,
-                float(result.get("score", 0)),
-                int(time.time()),
+                score,
+                now,
             ),
         )
+        if question:
+            next_review_at = now if score < 70 else now + 86400
+            connection.execute(
+                """
+                INSERT INTO user_question_states(user_id,question_id,mastery_level,next_review_at,last_rating)
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(user_id,question_id) DO UPDATE SET
+                  mastery_level=excluded.mastery_level,
+                  next_review_at=MIN(COALESCE(user_question_states.next_review_at,excluded.next_review_at),excluded.next_review_at),
+                  last_rating=excluded.last_rating
+                """,
+                (user_id, payload.question_id, round(score / 100, 3), next_review_at, "interview"),
+            )
     return {"id": turn_id, "evaluation": result, "follow_up": follow_up, "next_depth": next_depth}
 
 
@@ -2586,12 +2947,20 @@ def interview_report(interview_id: str, user_id: str = Depends(require_auth)):
             except (TypeError, ValueError):
                 continue
     dimensions = {key: round(sum(values) / len(values), 1) for key, values in dimension_values.items() if values}
+    report_score = round(sum(scores) / len(scores), 1) if scores else 0
+    completed_at = int(time.time())
+    with db() as connection:
+        connection.execute(
+            "UPDATE interviews SET completed_at=?,report_score=? WHERE id=? AND user_id=?",
+            (completed_at, report_score, interview_id, user_id),
+        )
+        complete_next_interview_task(connection, user_id, interview["mode"] or "general", interview_id)
     return {
         "interview_id": interview_id,
         "mode": interview["mode"] or "general",
         "project_title": interview["project_title"] or "",
         "answered_turns": len(evaluations),
-        "score": round(sum(scores) / len(scores), 1) if scores else 0,
+        "score": report_score,
         "dimensions": dimensions,
         "strengths": list(dict.fromkeys(strengths))[:6],
         "weaknesses": list(dict.fromkeys(weaknesses))[:6],
@@ -2683,4 +3052,22 @@ def review(item_id: str, payload: ReviewIn, user_id: str = Depends(require_auth)
             """,
             (user_id, item_id, weights[payload.rating] / 3, count, now, next_at, interval, 2.5, stability, difficulty, lapse_count, payload.rating),
         )
+        remaining_due = connection.execute(
+            "SELECT COUNT(*) FROM user_question_states WHERE user_id=? AND (next_review_at IS NULL OR next_review_at<=?)",
+            (user_id, now),
+        ).fetchone()[0]
+        if remaining_due == 0:
+            task = connection.execute(
+                """
+                SELECT id FROM training_tasks
+                WHERE user_id=? AND status='pending' AND task_type='review' AND due_date<=?
+                ORDER BY due_date,created_at LIMIT 1
+                """,
+                (user_id, coach_today().isoformat()),
+            ).fetchone()
+            if task:
+                connection.execute(
+                    "UPDATE training_tasks SET status='completed',completed_at=? WHERE id=?",
+                    (now, task["id"]),
+                )
     return {"message": "复习记录已保存", "interval_days": interval, "next_review_at": next_at, "stability": round(stability, 2), "difficulty_factor": round(difficulty, 2), "recall_probability": 1.0}

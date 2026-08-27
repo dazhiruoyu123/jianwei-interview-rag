@@ -1,5 +1,5 @@
 <?php
-$page = $_GET['page'] ?? 'ask';
+$page = $_GET['page'] ?? 'dashboard';
 $tab = $_GET['tab'] ?? 'manage';
 
 $legacyTabs = ['manage' => 'manage', 'new' => 'new', 'import' => 'import', 'banks' => 'banks'];
@@ -10,14 +10,15 @@ if (isset($legacyTabs[$page])) {
 if ($page === 'compare') {
     $page = 'ask';
 }
-if (!in_array($page, ['ask', 'interview', 'review', 'knowledge', 'push', 'ai-settings', 'admin'], true)) {
-    $page = 'ask';
+if (!in_array($page, ['dashboard', 'ask', 'interview', 'review', 'knowledge', 'push', 'ai-settings', 'admin'], true)) {
+    $page = 'dashboard';
 }
 if (!in_array($tab, ['manage', 'new', 'import', 'banks', 'index'], true)) {
     $tab = 'manage';
 }
 
 $titles = [
+    'dashboard' => '训练工作台',
     'ask' => 'AI 问答',
     'interview' => '模拟面试',
     'review' => '学习计划',
@@ -27,6 +28,7 @@ $titles = [
     'admin' => '用户与邀请码',
 ];
 $descriptions = [
+    'dashboard' => '围绕目标岗位安排今天的训练，并持续跟踪能力变化。',
     'ask' => '基于题库检索证据，再由 DeepSeek 生成有来源的回答。',
     'interview' => '从指定题库抽题，获得评分、反馈和最多两轮追问。',
     'review' => '按照记忆稳定度安排复习，巩固模拟面试中回答过的题目。',
@@ -45,7 +47,7 @@ function tabClass($value, $tab) { return $value === $tab ? 'knowledge-tab active
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#0f172a">
   <title>鉴微 · <?=htmlspecialchars($titles[$page], ENT_QUOTES, 'UTF-8')?></title>
-  <link rel="stylesheet" href="/assets/app.css?v=4.3.0">
+  <link rel="stylesheet" href="/assets/app.css?v=4.0.0">
 </head>
 <body data-page="<?=htmlspecialchars($page, ENT_QUOTES, 'UTF-8')?>">
 <div id="loginView" class="login-view hidden">
@@ -81,6 +83,7 @@ function tabClass($value, $tab) { return $value === $tab ? 'knowledge-tab active
       <div><strong>鉴微</strong><span>面试学习助手</span></div>
     </div>
     <nav class="nav-menu">
+      <a href="/?page=dashboard" title="训练工作台" class="<?=navClass('dashboard', $page)?>"><span class="nav-icon">⌂</span><span><b>训练工作台</b><small>目标、任务与进度</small></span></a>
       <a href="/?page=ask" title="AI 问答" class="<?=navClass('ask', $page)?>"><span class="nav-icon">✦</span><span><b>AI 问答</b><small>检索并生成回答</small></span></a>
       <a href="/?page=interview" title="模拟面试" class="<?=navClass('interview', $page)?>"><span class="nav-icon">◎</span><span><b>模拟面试</b><small>抽题、评分与追问</small></span></a>
       <a href="/?page=review" title="学习计划" class="<?=navClass('review', $page)?>"><span class="nav-icon">↻</span><span><b>学习计划</b><small>间隔复习与巩固</small></span></a>
@@ -107,7 +110,66 @@ function tabClass($value, $tab) { return $value === $tab ? 'knowledge-tab active
       <div class="service-status"><span></span><b id="health">服务检测中</b></div>
     </header>
 
-    <?php if ($page === 'ask'): ?>
+    <?php if ($page === 'dashboard'): ?>
+      <section id="coachGoal" class="coach-goal-band">
+        <div class="coach-goal-main">
+          <span class="eyebrow">TARGET ROLE</span>
+          <h2 id="coachGoalTitle">先设置你的目标岗位</h2>
+          <p id="coachGoalMeta">系统会根据面试日期、材料和训练记录安排每天的任务。</p>
+        </div>
+        <div class="coach-goal-actions">
+          <span id="coachCountdown" class="coach-countdown">尚未设置日期</span>
+          <button class="ghost" type="button" onclick="openCoachProfile()">编辑目标</button>
+          <a class="button-link" href="/?page=interview">开始面试</a>
+        </div>
+      </section>
+
+      <section class="coach-overview">
+        <article class="readiness-panel">
+          <div class="readiness-ring" id="readinessRing"><strong id="coachReadiness">0</strong><span>准备度</span></div>
+          <div class="readiness-copy"><span class="eyebrow">READINESS</span><h2 id="readinessTitle">等待首次诊断</h2><p id="readinessHint">完善求职材料并完成一次模拟面试后，准备度会更准确。</p><div id="readinessBreakdown" class="readiness-breakdown"></div></div>
+        </article>
+        <div class="coach-stat-grid">
+          <article><span>已完成面试</span><strong id="coachInterviewCount">0</strong><small>累计训练轮次</small></article>
+          <article><span>面试平均分</span><strong id="coachAverageScore">0</strong><small>基于已作答主问题</small></article>
+          <article><span>今日待复习</span><strong id="coachDueReviews">0</strong><small>来自低分题和到期题</small></article>
+          <article><span>知识库题目</span><strong id="coachKnowledgeCount">0</strong><small>可用于检索与抽题</small></article>
+        </div>
+      </section>
+
+      <section class="coach-content-grid">
+        <article class="coach-section">
+          <div class="coach-section-head"><div><span class="eyebrow">TODAY</span><h2>今日训练</h2><p>先完成最靠前的任务，避免在功能之间来回选择。</p></div><span id="coachTaskProgress" class="task-progress">0 / 0</span></div>
+          <div id="coachTaskList" class="coach-task-list"><div class="empty">加载训练计划中</div></div>
+        </article>
+        <aside class="coach-section coach-insights">
+          <div class="coach-section-head"><div><span class="eyebrow">WEAK SPOTS</span><h2>优先补齐</h2><p>来自最近的面试评分和反馈。</p></div></div>
+          <div id="coachWeakAreas" class="weak-area-list"><div class="empty">完成面试后生成薄弱项</div></div>
+          <div class="score-trend-head"><b>最近面试</b><span>分数趋势</span></div>
+          <div id="coachScoreTrend" class="score-trend"><div class="empty">暂无成绩记录</div></div>
+        </aside>
+      </section>
+
+      <details id="coachProfileEditor" class="panel coach-profile-editor">
+        <summary><span><b>目标岗位与训练材料</b><small>保存后自动生成未来 7 天训练计划</small></span><i>＋</i></summary>
+        <form id="coachProfileForm" class="coach-profile-form">
+          <div class="coach-profile-grid">
+            <label>目标岗位<input id="coachPosition" maxlength="120" placeholder="例如：Java 后端工程师" required></label>
+            <label>目标面试日期<input id="coachInterviewDate" type="date"></label>
+            <label>经验阶段<select id="coachExperience"><option>应届 / 实习</option><option selected>1-3 年</option><option>3-5 年</option><option>5 年以上</option></select></label>
+            <label>每日训练时长<select id="coachDailyMinutes"><option value="15">15 分钟</option><option value="30" selected>30 分钟</option><option value="45">45 分钟</option><option value="60">60 分钟</option><option value="90">90 分钟</option></select></label>
+            <label class="span-2">重点方向<input id="coachFocusAreas" placeholder="例如：JVM、MySQL、系统设计，用逗号分隔"></label>
+          </div>
+          <div class="coach-material-grid">
+            <label class="coach-material-field"><span><b>招聘 JD</b><small>用于识别岗位要求和知识缺口</small></span><textarea id="coachJd" rows="8" placeholder="粘贴招聘描述，或上传文件提取文字"></textarea><span class="material-upload"><input type="file" accept=".pdf,.docx,.md,.markdown,.txt,.json,.csv" onchange="extractCoachMaterial('coachJd',this)">上传 JD 文件</span></label>
+            <label class="coach-material-field"><span><b>简历摘要</b><small>建议保留技术栈、职责和量化结果</small></span><textarea id="coachResume" rows="8" placeholder="粘贴简历文本，敏感信息可先删除"></textarea><span class="material-upload"><input type="file" accept=".pdf,.docx,.md,.markdown,.txt,.json,.csv" onchange="extractCoachMaterial('coachResume',this)">上传简历文件</span></label>
+            <label class="coach-material-field"><span><b>项目材料</b><small>用于自动带入项目深挖面试</small></span><textarea id="coachProject" rows="8" placeholder="写清业务背景、架构、个人贡献、指标与故障复盘"></textarea><span class="material-upload"><input type="file" accept=".pdf,.docx,.md,.markdown,.txt,.json,.csv" onchange="extractCoachMaterial('coachProject',this)">上传项目文件</span></label>
+          </div>
+          <div class="coach-profile-actions"><span>材料仅保存在当前账号的私有档案中</span><button id="coachProfileSave" type="submit">保存并生成计划</button></div>
+        </form>
+      </details>
+
+    <?php elseif ($page === 'ask'): ?>
       <section class="rag-workspace">
         <article class="panel rag-main">
           <div class="rag-toolbar">
@@ -330,6 +392,6 @@ function tabClass($value, $tab) { return $value === $tab ? 'knowledge-tab active
 
 <div id="editModal" class="modal hidden"><div class="modal-card"><div class="modal-head"><h3 id="editModalTitle">编辑</h3><button class="icon-button" type="button" onclick="closeEditModal()">×</button></div><textarea id="editModalText" rows="16"></textarea><div class="actions"><button id="editModalSave" type="button">保存</button></div></div></div>
 <div id="toast"></div>
-  <script src="/assets/app.js?v=4.3.0"></script>
+  <script src="/assets/app.js?v=4.0.0"></script>
 </body>
 </html>

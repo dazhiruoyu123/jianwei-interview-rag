@@ -5,4 +5,5 @@ RUN sed -i 's|deb.debian.org/debian|mirrors.aliyun.com/debian|g; s|security.debi
 COPY requirements.txt .
 RUN pip install --no-cache-dir --retries 3 --timeout 120 -r requirements.txt
 COPY app ./app
+COPY tests ./tests
 CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000","--workers","1"]

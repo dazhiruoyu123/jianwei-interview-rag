@@ -1,5 +1,5 @@
 const api = "/api";
-const UI_VERSION = "4.3.0";
+const UI_VERSION = "4.0.0";
 let banks = [];
 let currentUser = null;
 let currentInterview = null;
@@ -376,7 +376,7 @@ async function init() {
     currentUser = await request("/auth/me");
     document.getElementById("adminNav")?.classList.toggle("hidden", currentUser.role !== "admin");
     if (document.body.dataset.page === "admin" && currentUser.role !== "admin") {
-      window.location.replace("/?page=ask");
+      window.location.replace("/?page=dashboard");
       return;
     }
     const health = await fetch("/health").then((r) => r.json());
@@ -393,12 +393,187 @@ async function init() {
     if (indexHealth) indexHealth.textContent = health.status === "ok" ? "运行正常" : "需要检查";
   } catch { document.getElementById("health").textContent = zh.serviceDown; }
   await loadBanks();
+  if (document.getElementById("coachTaskList")) loadCoachDashboard();
+  if (document.getElementById("projectTitle")) loadCoachInterviewContext();
   if (document.getElementById("askButton")) loadAIAvailability();
   if (document.getElementById("questionList")) loadQuestions();
   if (document.getElementById("reviewList")) loadReviews("today");
   if (document.getElementById("pushStatus")) loadPushSettings();
   if (document.getElementById("aiSettingsForm")) loadAISettings();
   if (document.getElementById("adminUserList")) { loadAdminData(); loadAdminMetrics(); }
+}
+
+function openCoachProfile() {
+  const editor = document.getElementById("coachProfileEditor");
+  if (!editor) return;
+  editor.open = true;
+  editor.scrollIntoView({ behavior: "smooth", block: "start" });
+  setTimeout(() => document.getElementById("coachPosition")?.focus(), 350);
+}
+
+function fillCoachProfile(profile = {}) {
+  const values = {
+    coachPosition: profile.target_position || "",
+    coachInterviewDate: profile.interview_date || "",
+    coachExperience: profile.experience_level || "1-3 年",
+    coachDailyMinutes: String(profile.daily_minutes || 30),
+    coachFocusAreas: (profile.focus_areas || []).join("、"),
+    coachJd: profile.jd_text || "",
+    coachResume: profile.resume_summary || "",
+    coachProject: profile.project_summary || "",
+  };
+  for (const [id, value] of Object.entries(values)) {
+    const element = document.getElementById(id);
+    if (element) element.value = value;
+  }
+}
+
+function readinessMessage(score) {
+  if (score >= 80) return ["已进入面试状态", "保持复习节奏，并通过复测确认稳定发挥。"];
+  if (score >= 60) return ["具备基础竞争力", "优先补齐低分维度，再进行一轮岗位复测。"];
+  if (score >= 30) return ["正在形成能力基线", "完成今日任务，系统会逐步收敛训练重点。"];
+  return ["等待首次诊断", "完善求职材料并完成一次模拟面试后，准备度会更准确。"];
+}
+
+function renderCoachTasks(tasks = []) {
+  const list = document.getElementById("coachTaskList");
+  if (!list) return;
+  const completed = tasks.filter((task) => task.status === "completed").length;
+  const progress = document.getElementById("coachTaskProgress");
+  if (progress) progress.textContent = `${completed} / ${tasks.length}`;
+  if (!tasks.length) {
+    list.innerHTML = `<div class="empty">设置目标岗位后生成今日训练任务</div>`;
+    return;
+  }
+  const typeLabels = { baseline: "诊断", review: "复习", knowledge: "问答", project_interview: "项目", general_interview: "专项", retest: "复测" };
+  list.innerHTML = tasks.map((task) => {
+    const done = task.status === "completed";
+    return `<article class="coach-task ${done ? "completed" : ""}"><label class="task-check"><input type="checkbox" ${done ? "checked" : ""} onchange="toggleCoachTask('${task.id}',this.checked)"><span aria-hidden="true"></span></label><div class="task-copy"><div><em>${escapeHtml(typeLabels[task.task_type] || "训练")}</em><small>${escapeHtml(task.due_date)}</small></div><strong>${escapeHtml(task.title)}</strong><p>${escapeHtml(task.description || "")}</p></div><a class="task-action" href="${escapeAttr(task.action_url || "/?page=dashboard")}" title="进入训练">→</a></article>`;
+  }).join("");
+}
+
+function renderCoachWeakAreas(items = []) {
+  const list = document.getElementById("coachWeakAreas");
+  if (!list) return;
+  if (!items.length) {
+    list.innerHTML = `<div class="empty">完成面试后生成薄弱项</div>`;
+    return;
+  }
+  list.innerHTML = items.map((item, index) => `<div class="weak-area"><span>${String(index + 1).padStart(2, "0")}</span><div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.source || "面试反馈")}</small></div>${item.score === null || item.score === undefined ? "" : `<b>${Number(item.score).toFixed(0)}</b>`}</div>`).join("");
+}
+
+function renderCoachTrend(items = []) {
+  const chart = document.getElementById("coachScoreTrend");
+  if (!chart) return;
+  if (!items.length) {
+    chart.innerHTML = `<div class="empty">暂无成绩记录</div>`;
+    return;
+  }
+  chart.innerHTML = items.map((item) => `<div class="trend-item" title="${escapeAttr(item.date)} · ${Number(item.score).toFixed(1)} 分"><b style="height:${Math.max(8, Math.min(100, Number(item.score)))}%"></b><span>${escapeHtml(item.date)}</span><em>${Number(item.score).toFixed(0)}</em></div>`).join("");
+}
+
+async function loadCoachDashboard() {
+  try {
+    const data = await request("/coach/dashboard");
+    const profile = data.profile || {};
+    fillCoachProfile(profile);
+    document.getElementById("coachGoalTitle").textContent = profile.configured ? profile.target_position : "先设置你的目标岗位";
+    document.getElementById("coachGoalMeta").textContent = profile.configured
+      ? `${profile.experience_level || "未设置经验"} · 每天 ${Number(profile.daily_minutes || 30)} 分钟 · ${(profile.focus_areas || []).join("、") || "等待补充重点方向"}`
+      : "系统会根据面试日期、材料和训练记录安排每天的任务。";
+    document.getElementById("coachCountdown").textContent = data.days_left === null ? "尚未设置日期" : data.days_left === 0 ? "面试就在今天" : `距离面试 ${data.days_left} 天`;
+    const readiness = Number(data.readiness || 0);
+    document.getElementById("coachReadiness").textContent = String(readiness);
+    document.getElementById("readinessRing")?.style.setProperty("--readiness", `${readiness * 3.6}deg`);
+    const [title, hint] = readinessMessage(readiness);
+    document.getElementById("readinessTitle").textContent = title;
+    document.getElementById("readinessHint").textContent = hint;
+    document.getElementById("readinessBreakdown").innerHTML = Object.entries(data.readiness_breakdown || {}).map(([label, value]) => `<span><b>${escapeHtml(label)}</b><em>${Number(value)}</em></span>`).join("");
+    document.getElementById("coachInterviewCount").textContent = Number(data.stats?.interview_count || 0);
+    document.getElementById("coachAverageScore").textContent = Number(data.stats?.average_score || 0).toFixed(1);
+    document.getElementById("coachDueReviews").textContent = Number(data.stats?.due_reviews || 0);
+    document.getElementById("coachKnowledgeCount").textContent = Number(data.stats?.knowledge_count || 0);
+    renderCoachTasks(data.tasks || []);
+    renderCoachWeakAreas(data.weak_areas || []);
+    renderCoachTrend(data.recent_interviews || []);
+    if (!profile.configured) document.getElementById("coachProfileEditor").open = true;
+  } catch (error) {
+    const list = document.getElementById("coachTaskList");
+    if (list) list.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function toggleCoachTask(taskId, completed) {
+  try {
+    await request(`/coach/tasks/${taskId}`, { method: "PATCH", body: JSON.stringify({ completed }) });
+    await loadCoachDashboard();
+  } catch (error) {
+    toast(error.message);
+    await loadCoachDashboard();
+  }
+}
+
+async function extractCoachMaterial(targetId, input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  if (file.size > 10 * 1024 * 1024) return toast("材料文件不能超过 10 MB");
+  const target = document.getElementById(targetId);
+  const label = input.parentElement;
+  const original = label?.textContent || "上传文件";
+  if (label) label.lastChild.textContent = "正在提取...";
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    const data = await requestRaw("/coach/materials/extract", { method: "POST", body: form });
+    if (target) target.value = data.text || "";
+    toast(`已提取 ${Number(data.characters || 0)} 字`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    input.value = "";
+    if (label) label.lastChild.textContent = original.trim();
+  }
+}
+
+document.getElementById("coachProfileForm")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = document.getElementById("coachProfileSave");
+  const payload = {
+    target_position: document.getElementById("coachPosition").value.trim(),
+    interview_date: document.getElementById("coachInterviewDate").value,
+    experience_level: document.getElementById("coachExperience").value,
+    daily_minutes: Number(document.getElementById("coachDailyMinutes").value || 30),
+    focus_areas: splitList(document.getElementById("coachFocusAreas").value),
+    jd_text: document.getElementById("coachJd").value.trim(),
+    resume_summary: document.getElementById("coachResume").value.trim(),
+    project_summary: document.getElementById("coachProject").value.trim(),
+  };
+  if (!payload.target_position) return toast("请填写目标岗位");
+  setButtonBusy(button, true, "正在生成计划");
+  try {
+    const data = await request("/coach/profile", { method: "PUT", body: JSON.stringify(payload) });
+    toast(data.message || "训练计划已更新");
+    document.getElementById("coachProfileEditor").open = false;
+    await loadCoachDashboard();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setButtonBusy(button, false);
+  }
+});
+
+async function loadCoachInterviewContext() {
+  try {
+    const profile = await request("/coach/profile");
+    const params = new URLSearchParams(window.location.search);
+    updateInterviewMode(params.get("mode") === "general" ? "general" : "project");
+    if (!profile.configured) return;
+    const title = document.getElementById("projectTitle");
+    const info = document.getElementById("projectInfo");
+    if (title && !title.value) title.value = `${profile.target_position}项目经历`;
+    if (info && !info.value && profile.project_summary) info.value = profile.project_summary;
+  } catch (_) {}
 }
 
 async function loadAIAvailability() {
@@ -890,7 +1065,7 @@ async function renderInterviewReport() {
     const report = await request(`/interviews/${currentInterview.id}/report`);
     const strengths = (report.strengths || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("") || `<li>\u5b8c\u6210\u66f4\u591a\u56de\u7b54\u540e\u751f\u6210</li>`;
     const weaknesses = (report.weaknesses || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("") || `<li>\u5b8c\u6210\u66f4\u591a\u56de\u7b54\u540e\u751f\u6210</li>`;
-    board.innerHTML = `<section class="interview-report"><div class="report-score"><span>${zh.reportTitle}</span><strong>${Number(report.score || 0).toFixed(1)}</strong><small>${zh.answeredTurns} ${report.answered_turns}</small></div>${renderEvaluationDimensions(report.dimensions)}<div class="report-columns"><article><h3>${zh.strengthsLabel}</h3><ul>${strengths}</ul></article><article><h3>${zh.weaknessesLabel}</h3><ul>${weaknesses}</ul></article></div><div class="actions"><button onclick="restartInterview()">${zh.restartInterview}</button></div></section>`;
+    board.innerHTML = `<section class="interview-report"><div class="report-score"><span>${zh.reportTitle}</span><strong>${Number(report.score || 0).toFixed(1)}</strong><small>${zh.answeredTurns} ${report.answered_turns}</small></div>${renderEvaluationDimensions(report.dimensions)}<div class="report-columns"><article><h3>${zh.strengthsLabel}</h3><ul>${strengths}</ul></article><article><h3>${zh.weaknessesLabel}</h3><ul>${weaknesses}</ul></article></div><div class="actions"><button onclick="restartInterview()">${zh.restartInterview}</button><a class="button-link ghost-link" href="/?page=review">复习薄弱题</a><a class="button-link" href="/?page=dashboard">回到工作台</a></div></section>`;
   } catch (error) { board.innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`; }
 }
 function restartInterview() {
