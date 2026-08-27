@@ -1,192 +1,182 @@
-# Jianwei Interview RAG
+# 鉴微 · 面试 RAG
 
-Jianwei (??) is a lightweight interview question bank, retrieval, mock interview, and review system. It uses a PHP/Apache frontend, FastAPI backend, SQLite metadata storage, and a lightweight vector retrieval layer. The project is designed for small servers and Docker Compose deployment.
+鉴微是一个面向面试准备的题库、检索、模拟面试与复习系统。项目采用 PHP/Apache 前端、FastAPI 后端、SQLite 元数据存储和 Milvus Lite 向量检索，适合使用 Docker Compose 部署在小型云服务器上。
 
-## Status
+当前版本：`v3.0.0`
 
-Current version: `v2.4.0`
+## 功能特性
 
-v1.8 is the final polishing release for this deployment:
+- **智能问答**：从题库召回相关内容，生成有依据的回答。
+- **混合检索**：支持语义检索、关键词检索和可调权重的混合检索。
+- **题库管理**：创建多个题库空间，按用户隔离数据和权限。
+- **多格式导入**：支持 JSON、CSV、Markdown、TXT，并提供导入预览、分块和失败提示。
+- **模拟面试**：随机抽题、回答评估、追问和面试报告。
+- **项目面试**：从项目材料中提炼事实、贡献、架构决策、事故和风险等信息，生成结构化面试流程。
+- **复习计划**：根据作答记录生成复习队列，支持间隔复习。
+- **AI 配置**：支持管理员或用户配置 OpenAI 兼容接口（例如 DeepSeek）。
+- **ShowDoc 推送**：支持手动或定时推送题目到 ShowDoc（可选）。
+- **管理指标**：记录请求、搜索和检索质量指标，提供管理员统计接口。
+- **Markdown 展示**：题目、答案和项目材料支持 Markdown。
 
-- Simplifies the sidebar search box to plain text input only.
-- Enlarges the Question Management search field for long keywords and answer snippets.
-- Keeps the grouped sidebar navigation introduced in v1.7.
-- Keeps consistent Question / Answer cards across retrieval, review, and management pages.
-- Keeps Markdown-compatible display for questions and answers.
-- Adds this GitHub-ready README and a safe `.gitignore`.
-
-## Features
-
-- Smart Q&A: retrieves Top 3 sources from the question bank and returns a grounded answer.
-- Custom Retrieval: semantic, keyword, and hybrid search with adjustable weights.
-- Mock Interview: randomly selects 6 questions from a chosen bank, evaluates answers, and asks follow-up questions.
-- Review Plan: review queue based on answered mock interview questions.
-- Question Banks: create and manage multiple bank spaces.
-- Question Management: search by question, answer, and tags; edit question and answer separately.
-- Multi-format Import: JSON, CSV, Markdown, and TXT.
-- Markdown Display: question and answer content can be written and displayed in Markdown.
-
-## Architecture
+## 整体架构
 
 ```mermaid
-flowchart LR
-    Browser[Browser] --> Web[PHP / Apache Frontend]
-    Web --> API[FastAPI Backend]
-    API --> Auth[Token Auth]
-    API --> DB[(SQLite Metadata)]
-    API --> Vector[Milvus Lite / Vector Index]
-    API --> Embed[Lightweight Embedding or Hash Backend]
-    API --> LLM[DeepSeek API Optional]
+flowchart TB
+    User[浏览器用户] --> Web[PHP + Apache 前端]
+    Web -->|REST/JSON| API[FastAPI 应用]
+
+    subgraph API层
+        Auth[Token 认证与权限]
+        Router[业务 API 路由]
+        Search[混合检索与排序]
+        Interview[模拟面试/项目面试 Agent]
+        Import[导入解析与答案分块]
+        Push[ShowDoc 推送调度器]
+        Metrics[请求与检索指标]
+    end
+
+    API --> Auth
+    API --> Router
+    Router --> Search
+    Router --> Interview
+    Router --> Import
+    Router --> Push
+    Router --> Metrics
+
+    Search --> SQLite[(SQLite\n用户、题库、题目、日志)]
+    Search --> Milvus[(Milvus Lite\n向量集合)]
+    Search --> Embed[FastEmbed\nbge-small-zh-v1.5]
+    Interview --> SQLite
+    Import --> SQLite
+    Metrics --> SQLite
+    API -->|可选| LLM[DeepSeek/OpenAI 兼容 LLM]
+    Push -->|可选 HTTPS| ShowDoc[ShowDoc 推送接口]
 ```
 
-## Runtime Flow
+### 组件职责
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant W as PHP Frontend
-    participant A as FastAPI
-    participant D as SQLite
-    participant V as Vector Index
-    U->>W: Search / Ask / Manage
-    W->>A: REST API request
-    A->>D: Read metadata and question content
-    A->>V: Retrieve vector candidates
-    A-->>W: Return ranked Question / Answer blocks
-    W-->>U: Render Markdown-compatible result cards
-```
+| 组件 | 技术 | 职责 |
+| --- | --- | --- |
+| Web | PHP 8.3、Apache | 页面渲染、静态资源、反向代理和浏览器交互 |
+| API | Python、FastAPI、Uvicorn | 认证、题库管理、检索、面试、导入和推送接口 |
+| 元数据层 | SQLite | 用户、权限、题库、题目、面试记录、复习记录和指标 |
+| 向量层 | Milvus Lite | 保存题目/答案向量并执行相似度检索 |
+| Embedding | FastEmbed `BAAI/bge-small-zh-v1.5` | 将问题和答案转换为向量，也可切换为低资源 hash 模式 |
+| LLM | DeepSeek 或其他 OpenAI 兼容服务 | 生成问答、评估回答和项目面试追问 |
+| 持久化 | Docker bind mount + named volume | `data/` 保存业务数据，`model-cache` 保存模型缓存 |
 
-## Directory Structure
+### 一次检索请求的链路
+
+1. 浏览器通过 PHP 页面发起请求，Apache 将 `/api/*` 转发到 FastAPI。
+2. FastAPI 校验 Token 和用户所属题库范围。
+3. 系统并行计算关键词匹配和向量相似度，从 Milvus Lite 召回候选。
+4. 按语义分数、关键词分数、标签和题库权限进行重排，返回 Question/Answer 结果块。
+5. `/api/ask` 在有 API Key 时将召回上下文发送给 LLM；没有 Key 时仍可使用检索功能。
+6. 中间件记录请求耗时、状态码、用户和检索指标，供管理员统计。
+
+### 数据与索引
+
+- SQLite 文件：`data/app.db`。
+- Milvus Lite 文件：`data/milvus.db`。
+- 向量集合名称按 Embedding 后端和模型生成，例如 `interview_qa_fastembed_baai_bge_small_zh_v1_5_parent_child_user_v3`。
+- 答案按重叠窗口分块，父题目与子分块同时保存，检索命中后再合并展示。
+- 设置 `REBUILD_VECTOR_INDEX=1` 可在启动时重建当前向量集合；生产环境默认保持 `0`。
+
+## 目录结构
 
 ```text
 interview-rag/
-??? backend/
-?   ??? Dockerfile
-?   ??? requirements.txt
-?   ??? app/main.py
-??? frontend/
-?   ??? Dockerfile
-?   ??? apache.conf
-?   ??? public/
-?       ??? index.php
-?       ??? assets/
-?           ??? app.css
-?           ??? app.js
-??? data/                 # runtime data, do not publish real data
-??? docker-compose.yml
-??? .env.example
-??? .gitignore
-??? README.md
+├── backend/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── app/main.py          # FastAPI 应用与业务路由
+├── frontend/
+│   ├── Dockerfile
+│   ├── apache.conf          # Apache 到 API 的反向代理
+│   └── public/
+│       ├── index.php
+│       └── assets/
+│           ├── app.css
+│           └── app.js
+├── data/                    # 运行时数据，不提交真实数据
+├── docker-compose.yml
+├── .env.example
+└── README.md
 ```
 
-## Quick Start
+## 快速开始
+
+要求：Docker Engine 24+ 和 Docker Compose v2。
 
 ```bash
 cp .env.example .env
+# 编辑 .env，至少修改 ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
-Open:
-
-```text
-http://127.0.0.1/
-```
-
-Health check:
+访问：<http://127.0.0.1/>
 
 ```bash
 curl http://127.0.0.1/health
+docker compose ps
 ```
 
-## Environment Variables
+## 环境变量
 
 ```env
 ADMIN_USER=admin
 ADMIN_PASSWORD=change-me
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-v4-pro
-EMBEDDING_BACKEND=hash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+EMBEDDING_BACKEND=fastembed
+REBUILD_VECTOR_INDEX=0
 ```
 
-Notes:
+- `fastembed` 使用中文向量模型，适合正式检索；首次启动需要准备模型缓存。
+- `hash` 不下载模型，资源占用更低，但语义检索效果较弱。
+- `DEEPSEEK_API_KEY` 为空时，检索和题库功能仍可用，依赖 LLM 的生成能力不可用。
+- `.env`、真实 API Key、`data/` 和数据库文件已被 `.gitignore` 排除，禁止提交到 GitHub。
 
-- `EMBEDDING_BACKEND=hash` is resource-friendly for 4-core 4GB servers.
-- A stronger Chinese embedding model can be enabled later if more memory is available.
-- Keep `.env` private and never commit real API keys.
-
-## Docker Deployment
+## 生产部署
 
 ```bash
 cd /opt/interview-rag
 docker compose up -d --build
-```
-
-Check services:
-
-```bash
 docker compose ps
 curl http://127.0.0.1/health
 ```
 
-## Open Source Checklist
+生产环境建议：
 
-Before publishing to GitHub:
+- 使用强密码并限制 80 端口的来源，必要时在前置 Nginx/Caddy 配置 HTTPS。
+- 定期备份 `data/app.db`、`data/milvus.db` 和 `.env`。
+- 保留 `model-cache` volume，避免每次重启重新下载模型。
+- ShowDoc 推送地址通过服务器专用 Compose override 或用户设置注入，不要写入仓库。
 
-- Do not commit `.env`, `data/`, database files, logs, or real question banks.
-- Keep `.env.example` as the public configuration template.
-- Add screenshots after UI stabilization.
-- Add a `LICENSE` file, such as MIT or Apache-2.0.
-- Add sanitized sample data if you want users to try the system quickly.
-- Consider GitHub Actions for Docker image build checks.
-
-## Release Package
+## 从 GitHub 更新
 
 ```bash
-cd /opt
-tar --exclude='interview-rag/data' --exclude='interview-rag/.env' -czf /root/jianwei-v1.8-final.tar.gz interview-rag
+cd /opt/interview-rag
+git pull --ff-only origin main
+docker compose up -d --build
+docker compose ps
 ```
 
-## Roadmap
+更新前建议备份：
 
-- GitHub Actions build and lint workflow.
-- Role-based user management.
-- Full Markdown renderer with tables and task lists.
-- Import preview and failed-row export.
-- Optional external vector database backend.
-- More configurable embedding and LLM providers.
+```bash
+tar --exclude='interview-rag/data' --exclude='interview-rag/.env' \
+  -czf /root/interview-rag-backup-$(date +%Y%m%d-%H%M%S).tar.gz /opt/interview-rag
+```
 
+## 开源发布检查
 
-## v2.0 Import UI
+- 不提交 `.env`、数据库、日志、真实题库和 ShowDoc 推送地址。
+- 保留 `.env.example` 作为配置模板。
+- 发布前执行 `python -m py_compile backend/app/main.py` 和 `docker compose config --quiet`。
+- 建议在 GitHub Actions 中执行 Docker 构建和基础接口测试。
 
-v2.0 focuses on the batch import page experience:
+## 许可证
 
-- Larger upload card with selected file name and file size.
-- Clear upload progress bar and success/error status block.
-- Side-by-side Markdown question-bank partition guide.
-- Reset button for clearing selected file, progress and result.
-- Server package path: `/root/jianwei-v2.0-final.tar.gz`.
-
-
-## v2.1 Tailwind UI
-
-v2.1 modernizes the PHP frontend with Tailwind CDN while preserving existing PHP routing, form IDs, JavaScript hooks and API behavior.
-
-- Notion/Vercel-inspired neutral UI language.
-- Tailwind CDN included directly in `frontend/public/index.php`.
-- Existing backend and API logic preserved.
-- Server package path: `/root/jianwei-v2.1-final.tar.gz`.
-
-
-## v2.2 Sidebar Refresh
-
-v2.2 sharpens the left navigation into a calmer SaaS-style shell, with stronger hierarchy, softer surfaces, and a more premium information density.
-
-
-## v2.3 AdminLTE Refresh
-
-This release refreshes the shell toward an AdminLTE-inspired console: stronger left navigation hierarchy, calmer surfaces, and more polished spacing.
-
-
-## v2.4 Lite Shell
-
-Simplifies the AdminLTE-inspired UI by removing repeated sidebar promotional blocks and reducing the top title bar to a cleaner title/status layout.
+当前仓库尚未指定许可证。公开分发前请补充合适的 LICENSE 文件。
